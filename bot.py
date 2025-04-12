@@ -5,10 +5,13 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import io
 import os
 from dotenv import load_dotenv
+from flask import Flask
+import threading
 
 # Load environment variables
 load_dotenv()
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN',"7805729196:AAHCZrSmEnf4gyl7pQuDOxv058tGPXYs-P4")
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', "7805729196:AAHCZrSmEnf4gyl7pQuDOxv058tGPXYs-P4")
+PORT = int(os.environ.get('PORT', 5000))
 
 # Enable logging
 logging.basicConfig(
@@ -16,6 +19,16 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Create Flask app for Render
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Telegram Grade Distribution Bot is running!"
+
+def run_flask_app():
+    app.run(host='0.0.0.0', port=PORT)
 
 # Conversation states
 SELECT_GRADE_COLUMN = 1
@@ -237,6 +250,12 @@ def main() -> None:
     if not TOKEN:
         raise ValueError("No Telegram token provided in environment variables")
     
+    # Start Flask server in a separate thread for Render
+    flask_thread = threading.Thread(target=run_flask_app)
+    flask_thread.daemon = True
+    flask_thread.start()
+
+    # Create Telegram bot application
     application = Application.builder().token(TOKEN).build()
 
     # Conversation handler
