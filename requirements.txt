@@ -1,0 +1,7 @@
+python-dotenv>=1.0.0
+python-telegram-bot>=20.0
+pandas>=2.0.0
+openpyxl>=3.0.0  # For Excel file support
+xlrd>=2.0.0      # For legacy Excel file support
+numpy>=1.20.0    # Required by pandas
+tabulate>=0.8.0  # For nice table formatting (optional)
