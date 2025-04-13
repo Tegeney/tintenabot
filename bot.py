@@ -5,52 +5,94 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import io
 import os
 from dotenv import load_dotenv
-from flask import Flask
+from flask import Flask, request
+from datetime import datetime
+import asyncio
 import threading
 
 # Load environment variables
 load_dotenv()
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', "7805729196:AAHCZrSmEnf4gyl7pQuDOxv058tGPXYs-P4")
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+if not TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN not set in .env")
 PORT = int(os.environ.get('PORT', 5000))
+WEBHOOK_PATH = '/webhook'
 
-# Enable logging
+# Enable logging to console and file
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
 # Create Flask app for Render
 app = Flask(__name__)
+application = None  # Global application instance for webhook
 
 @app.route('/')
 def home():
     return "Telegram Grade Distribution Bot is running!"
 
-def run_flask_app():
-    app.run(host='0.0.0.0', port=PORT)
+@app.route('/health')
+def health():
+    return {"status": "running", "timestamp": datetime.now().isoformat()}
+
+@app.route(WEBHOOK_PATH, methods=['POST'])
+async def webhook():
+    """Handle incoming Telegram updates."""
+    global application
+    try:
+        update = Update.de_json(request.get_json(), application.bot)
+        await application.process_update(update)
+        return '', 200
+    except Exception as e:
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        return '', 500
 
 # Conversation states
 SELECT_GRADE_COLUMN = 1
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /start command."""
     await update.message.reply_text(
         '📊 Grade Distribution Bot\n\n'
-        'Send me a spreadsheet with student grades to analyze.\n'
-        'I will automatically detect column headers and analyze your data.'
+        'Send me an Excel (.xlsx, .xls) or CSV file with student grades to analyze.\n'
+        'I will detect column headers and analyze your data.'
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /help command."""
     await update.message.reply_text(
         'Send an Excel/CSV file with student data. '
-        'The first row should contain column headers.\n'
-        'I will automatically detect sex/gender and grade columns.'
+        'First row must have headers.\n'
+        'I will detect sex/gender and grade columns.\n'
+        'Max file size: 10MB.'
     )
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Process uploaded spreadsheet."""
+    user_id = update.effective_user.id
+    logger.info(f"Received file from user {user_id}: {update.message.document.file_name}")
+    
     try:
-        # Download the file
+        # Validate file type and size
+        file_name = update.message.document.file_name.lower()
+        if not file_name.endswith(('.xlsx', '.xls', '.csv')):
+            await update.message.reply_text(
+                "❌ Please send an Excel (.xlsx, .xls) or CSV (.csv) file."
+            )
+            return ConversationHandler.END
+        
         file = await context.bot.get_file(update.message.document.file_id)
+        if file.file_size > 10_000_000:  # 10MB limit
+            await update.message.reply_text("❌ File too large. Max size: 10MB.")
+            return ConversationHandler.END
+
+        # Download file
         file_buffer = io.BytesIO()
         await file.download_to_memory(out=file_buffer)
         file_buffer.seek(0)
@@ -65,7 +107,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Clean column names
         df.columns = [str(col).strip() for col in df.columns]
 
-        # Auto-detect sex column (with improved detection)
+        # Auto-detect sex column
         sex_col = None
         for col in df.columns:
             col_lower = str(col).lower()
@@ -73,7 +115,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 sex_col = col
                 break
         
-        # If no explicit column found, look for M/F values
         if not sex_col:
             for col in df.columns:
                 unique_vals = df[col].dropna().astype(str).str.upper().unique()
@@ -82,116 +123,126 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     break
 
         if not sex_col:
+            columns = "\n".join([f"- {col}" for col in df.columns])
             await update.message.reply_text(
                 "❌ Couldn't detect sex/gender column.\n"
                 "I looked for:\n"
                 "- Columns named 'sex' or 'gender'\n"
-                "- Columns containing M/F or Male/Female values\n\n"
-                "Here are the columns I found:\n" + 
-                "\n".join([f"- {col}" for col in df.columns])
+                "- Columns with M/F or Male/Female values\n\n"
+                f"Found columns:\n{columns}"
             )
             return ConversationHandler.END
 
         # Clean sex data
         df[sex_col] = df[sex_col].astype(str).str.strip().str.upper()
         df[sex_col] = df[sex_col].replace({
-            'M': 'MALE',
-            'F': 'FEMALE',
-            'MALE': 'MALE', 
-            'FEMALE': 'FEMALE'
+            'M': 'MALE', 'F': 'FEMALE',
+            'MALE': 'MALE', 'FEMALE': 'FEMALE'
         })
         df = df[df[sex_col].isin(['MALE', 'FEMALE'])]
 
         # Store data
         context.user_data['df'] = df
         context.user_data['sex_col'] = sex_col
+        context.user_data['retries'] = 0  # Initialize retry counter
 
         # Show columns for grade selection
         columns = "\n".join([f"{i+1}. {col}" for i, col in enumerate(df.columns)])
         await update.message.reply_text(
-            f"✅ Detected sex/gender column: {sex_col}\n\n"
+            f"✅ Detected sex/gender column: `{sex_col}`\n\n"
             f"📋 Available columns:\n{columns}\n\n"
-            "Please reply with the NUMBER of the grade column to analyze:",
+            "Reply with the NUMBER of the grade column to analyze:",
             parse_mode='Markdown'
         )
-
         return SELECT_GRADE_COLUMN
 
     except Exception as e:
-        logger.error(f"Error processing file: {e}")
+        logger.error(f"Error processing file for user {user_id}: {e}", exc_info=True)
         await update.message.reply_text(
             "❌ Error processing your file.\n"
             "Please ensure:\n"
-            "- First row contains column headers\n"
-            "- Contains sex/gender information\n"
-            "- File is not password protected"
+            "- First row has headers\n"
+            "- Contains sex/gender data\n"
+            "- File is not password-protected"
         )
         return ConversationHandler.END
 
 async def select_grade_column(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle grade column selection."""
+    user_id = update.effective_user.id
     try:
+        # Enforce retry limit
+        context.user_data['retries'] = context.user_data.get('retries', 0)
+        if context.user_data['retries'] >= 3:
+            await update.message.reply_text(
+                "⚠️ Too many invalid inputs. Please start over with /start."
+            )
+            return ConversationHandler.END
+
         selection = int(update.message.text) - 1
         df = context.user_data['df'].copy()
         sex_col = context.user_data['sex_col']
 
         if selection < 0 or selection >= len(df.columns):
+            context.user_data['retries'] += 1
             await update.message.reply_text(
-                "⚠️ Invalid column number. Please try again.",
+                f"⚠️ Invalid column number. Try again (attempt {context.user_data['retries']}/3).",
                 parse_mode='Markdown'
             )
             return SELECT_GRADE_COLUMN
         
         grade_col = df.columns[selection]
+        context.user_data['retries'] = 0  # Reset retries on success
 
-        # Clean grade data
+        # Validate grade data
         df[grade_col] = pd.to_numeric(df[grade_col], errors='coerce')
+        if df[grade_col].isna().all():
+            await update.message.reply_text(
+                f"❌ Column `{grade_col}` contains no valid numeric grades."
+            )
+            return ConversationHandler.END
         df = df.dropna(subset=[grade_col])
 
-        # Convert to 0-10 scale if needed
+        # Scale grades if needed (assume 0-100 to 0-10)
         if df[grade_col].max() > 10:
             df[grade_col] = df[grade_col] / 10
+            logger.info(f"Scaled grades in {grade_col} for user {user_id}")
 
-        # Calculate statistics
+        # Calculate and send statistics
         result = calculate_statistics(df, sex_col, grade_col)
-        
-        # Send results
         await update.message.reply_text(result, parse_mode='Markdown')
-        
         return ConversationHandler.END
 
     except ValueError:
+        context.user_data['retries'] = context.user_data.get('retries', 0) + 1
         await update.message.reply_text(
-            "⚠️ Please enter a valid number.",
+            f"⚠️ Please enter a valid number (attempt {context.user_data['retries']}/3).",
             parse_mode='Markdown'
         )
         return SELECT_GRADE_COLUMN
     except Exception as e:
-        logger.error(f"Error in grade selection: {e}")
+        logger.error(f"Grade selection error for user {user_id}: {e}", exc_info=True)
         await update.message.reply_text(
-            "❌ Error processing your selection.\n"
-            "Please try again or send a new file.",
-            parse_mode='Markdown'
+            "❌ Error processing your selection. Try again or send a new file."
         )
         return ConversationHandler.END
 
 def calculate_statistics(df, sex_col, grade_col):
-    """Calculate grade distribution statistics with clear column info."""
+    """Calculate grade distribution statistics."""
     try:
         # Define grade ranges
         bins = [-1, 0, 4, 7, 10]
         labels = ['0', '1-4', '5-7', '8-10']
-        
-        # Create grade ranges
-        df.loc[:, 'grade_range'] = pd.cut(df[grade_col], bins=bins, labels=labels, right=True)
-        
-        # Create cross-tabulation with all categories
+        df['grade_range'] = pd.cut(df[grade_col], bins=bins, labels=labels, right=True)
+
+        # Create cross-tabulation
         grade_dist = pd.crosstab(
             index=df[sex_col],
             columns=df['grade_range'],
             margins=True,
             margins_name="TOTAL"
         ).reindex(columns=labels + ['TOTAL'], fill_value=0)
-        
+
         # Build result message
         result = f"📊 *Analysis Report*\n\n"
         result += f"🔹 *Using Columns:*\n"
@@ -212,7 +263,6 @@ def calculate_statistics(df, sex_col, grade_col):
                 count = grade_dist.loc[sex, grade]
                 row += f" {str(count).center(4)} │"
             result += row + "\n"
-            
             if sex != grade_dist.index[-1]:
                 result += "├──────────┼──────┼──────┼──────┼──────┼───────┤\n"
         
@@ -236,26 +286,19 @@ def calculate_statistics(df, sex_col, grade_col):
         result += "```"
         
         return result
-        
+
     except Exception as e:
-        logger.error(f"Error in statistics calculation: {e}")
-        return (
-            f"❌ Error analyzing `{grade_col}`\n"
-            f"Please check this column contains valid numerical grade data\n"
-            f"Technical details: {str(e)}"
-        )
+        logger.error(f"Statistics error: {e}", exc_info=True)
+        return f"❌ Error analyzing `{grade_col}`. Please check for valid numeric grades."
 
-def main() -> None:
-    """Start the bot."""
-    if not TOKEN:
-        raise ValueError("No Telegram token provided in environment variables")
-    
-    # Start Flask server in a separate thread for Render
-    flask_thread = threading.Thread(target=run_flask_app)
-    flask_thread.daemon = True
-    flask_thread.start()
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancel the conversation."""
+    await update.message.reply_text("Operation cancelled. Send /start to begin again.")
+    return ConversationHandler.END
 
-    # Create Telegram bot application
+async def setup_application():
+    """Initialize and configure the Telegram bot."""
+    global application
     application = Application.builder().token(TOKEN).build()
 
     # Conversation handler
@@ -265,24 +308,38 @@ def main() -> None:
             SELECT_GRADE_COLUMN: [MessageHandler(filters.TEXT & ~filters.COMMAND, select_grade_column)],
         },
         fallbacks=[
-            CommandHandler('cancel', lambda update, context: ConversationHandler.END),
+            CommandHandler('cancel', cancel),
             CommandHandler('help', help_command)
         ],
     )
 
-    # Command handlers
+    # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(conv_handler)
 
-    # Run the bot
-    print("Bot is running and waiting for files...")
+    # Set webhook
+    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
     try:
-        application.run_polling()
-    except KeyboardInterrupt:
-        print("\nBot stopped by user")
+        await application.bot.set_webhook(url=webhook_url)
+        logger.info(f"Webhook set to {webhook_url}")
     except Exception as e:
-        logger.error(f"Error running bot: {e}")
+        logger.error(f"Failed to set webhook: {e}")
+        raise
+
+def main():
+    """Start the bot with Flask."""
+    try:
+        # Run bot setup in async context
+        asyncio.run(setup_application())
+        
+        # Start Flask server
+        logger.info("Starting Flask server...")
+        app.run(host='0.0.0.0', port=PORT, use_reloader=False)
+        
+    except Exception as e:
+        logger.error(f"Main error: {e}", exc_info=True)
+        raise
 
 if __name__ == '__main__':
     load_dotenv()
