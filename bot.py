@@ -7,8 +7,7 @@ import os
 from dotenv import load_dotenv
 from flask import Flask, request
 from datetime import datetime
-import asyncio
-import threading
+import json
 
 # Load environment variables
 load_dotenv()
@@ -42,12 +41,12 @@ def health():
     return {"status": "running", "timestamp": datetime.now().isoformat()}
 
 @app.route(WEBHOOK_PATH, methods=['POST'])
-async def webhook():
-    """Handle incoming Telegram updates."""
+def webhook():
+    """Handle incoming Telegram updates synchronously."""
     global application
     try:
-        update = Update.de_json(request.get_json(), application.bot)
-        await application.process_update(update)
+        update = Update.de_json(json.loads(request.get_data(as_text=True)), application.bot)
+        application.process_update(update)  # Synchronous processing
         return '', 200
     except Exception as e:
         logger.error(f"Webhook error: {e}", exc_info=True)
@@ -331,7 +330,8 @@ def main():
     """Start the bot with Flask."""
     try:
         # Run bot setup in async context
-        asyncio.run(setup_application())
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(setup_application())
         
         # Start Flask server
         logger.info("Starting Flask server...")
