@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 # Create Flask app for Render
 app = Flask(__name__)
 application = None  # Global application instance for webhook
+loop = None  # Global event loop for async tasks
 
 @app.route('/')
 def home():
@@ -43,11 +44,13 @@ def health():
 
 @app.route(WEBHOOK_PATH, methods=['POST'])
 def webhook():
-    """Handle incoming Telegram updates synchronously."""
-    global application
+    """Handle incoming Telegram updates in a synchronous Flask route."""
+    global application, loop
     try:
         update = Update.de_json(json.loads(request.get_data(as_text=True)), application.bot)
-        application.process_update(update)  # Synchronous processing
+        # Run async process_update in the event loop
+        future = asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
+        future.result()  # Wait for the coroutine to complete
         return '', 200
     except Exception as e:
         logger.error(f"Webhook error: {e}", exc_info=True)
@@ -298,7 +301,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def setup_application():
     """Initialize and configure the Telegram bot."""
-    global application
+    global application, loop
     application = Application.builder().token(TOKEN).build()
 
     # Conversation handler
@@ -329,8 +332,9 @@ async def setup_application():
 
 def main():
     """Start the bot with Flask."""
+    global loop
     try:
-        # Run bot setup in async context
+        # Create and store event loop
         loop = asyncio.get_event_loop()
         loop.run_until_complete(setup_application())
         
