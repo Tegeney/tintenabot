@@ -47,10 +47,16 @@ def webhook():
     """Handle incoming Telegram updates in a synchronous Flask route."""
     global application, loop
     try:
-        update = Update.de_json(json.loads(request.get_data(as_text=True)), application.bot)
-        # Run async process_update in the event loop
-        future = asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
-        future.result()  # Wait for the coroutine to complete
+        data = json.loads(request.get_data(as_text=True))
+        update_id = data.get('update_id', 'unknown')
+        logger.info(f"Received webhook update: {update_id}")
+        update = Update.de_json(data, application.bot)
+        if update:
+            future = asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
+            future.result(timeout=10)  # Wait up to 10 seconds
+            logger.info(f"Processed update {update_id}")
+        else:
+            logger.warning(f"Invalid update received: {data}")
         return '', 200
     except Exception as e:
         logger.error(f"Webhook error: {e}", exc_info=True)
@@ -61,6 +67,10 @@ SELECT_GRADE_COLUMN = 1
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
+    user_id = update.effective_user.id
+    logger.info(f"Start command from user {user_id}")
+    # Reset any existing conversation state
+    context.user_data.clear()
     await update.message.reply_text(
         '📊 Grade Distribution Bot\n\n'
         'Send me an Excel (.xlsx, .xls) or CSV file with student grades to analyze.\n'
@@ -69,6 +79,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /help command."""
+    user_id = update.effective_user.id
+    logger.info(f"Help command from user {user_id}")
     await update.message.reply_text(
         'Send an Excel/CSV file with student data. '
         'First row must have headers.\n'
@@ -79,12 +91,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Process uploaded spreadsheet."""
     user_id = update.effective_user.id
-    logger.info(f"Received file from user {user_id}: {update.message.document.file_name}")
+    file_name = update.message.document.file_name
+    logger.info(f"Received file from user {user_id}: {file_name}")
     
     try:
         # Validate file type and size
-        file_name = update.message.document.file_name.lower()
-        if not file_name.endswith(('.xlsx', '.xls', '.csv')):
+        if not file_name.lower().endswith(('.xlsx', '.xls', '.csv')):
+            logger.warning(f"Invalid file type from user {user_id}: {file_name}")
             await update.message.reply_text(
                 "❌ Please send an Excel (.xlsx, .xls) or CSV (.csv) file."
             )
@@ -92,6 +105,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
         file = await context.bot.get_file(update.message.document.file_id)
         if file.file_size > 10_000_000:  # 10MB limit
+            logger.warning(f"File too large from user {user_id}: {file.file_size} bytes")
             await update.message.reply_text("❌ File too large. Max size: 10MB.")
             return ConversationHandler.END
 
@@ -103,9 +117,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Read file with first row as headers
         try:
             df = pd.read_excel(file_buffer, header=0)
+            logger.info(f"Read Excel file from user {user_id}")
         except:
             file_buffer.seek(0)
-            df = pd.read_csv(file_buffer, header=0)
+            try:
+                df = pd.read_csv(file_buffer, header=0)
+                logger.info(f"Read CSV file from user {user_id}")
+            except Exception as e:
+                logger.error(f"File read error for user {user_id}: {e}")
+                await update.message.reply_text(
+                    "❌ Error reading your file. Ensure it’s a valid Excel/CSV with headers."
+                )
+                return ConversationHandler.END
 
         # Clean column names
         df.columns = [str(col).strip() for col in df.columns]
@@ -127,6 +150,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         if not sex_col:
             columns = "\n".join([f"- {col}" for col in df.columns])
+            logger.warning(f"No sex/gender column detected for user {user_id}")
             await update.message.reply_text(
                 "❌ Couldn't detect sex/gender column.\n"
                 "I looked for:\n"
@@ -137,7 +161,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return ConversationHandler.END
 
         # Clean sex data
-        df[sex_col] = df[sex_col].astype(str).str.strip().str.upper()
+        df[sex_col] = df[sex_col].astype(str).strip().str.upper()
         df[sex_col] = df[sex_col].replace({
             'M': 'MALE', 'F': 'FEMALE',
             'MALE': 'MALE', 'FEMALE': 'FEMALE'
@@ -151,6 +175,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         # Show columns for grade selection
         columns = "\n".join([f"{i+1}. {col}" for i, col in enumerate(df.columns)])
+        logger.info(f"Prompting user {user_id} for grade column selection")
         await update.message.reply_text(
             f"✅ Detected sex/gender column: `{sex_col}`\n\n"
             f"📋 Available columns:\n{columns}\n\n"
@@ -173,10 +198,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def select_grade_column(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle grade column selection."""
     user_id = update.effective_user.id
+    logger.info(f"Grade column input from user {user_id}: {update.message.text}")
     try:
         # Enforce retry limit
         context.user_data['retries'] = context.user_data.get('retries', 0)
         if context.user_data['retries'] >= 3:
+            logger.warning(f"Too many retries for user {user_id}")
             await update.message.reply_text(
                 "⚠️ Too many invalid inputs. Please start over with /start."
             )
@@ -188,6 +215,7 @@ async def select_grade_column(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if selection < 0 or selection >= len(df.columns):
             context.user_data['retries'] += 1
+            logger.warning(f"Invalid column number from user {user_id}: {selection + 1}")
             await update.message.reply_text(
                 f"⚠️ Invalid column number. Try again (attempt {context.user_data['retries']}/3).",
                 parse_mode='Markdown'
@@ -196,10 +224,12 @@ async def select_grade_column(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         grade_col = df.columns[selection]
         context.user_data['retries'] = 0  # Reset retries on success
+        logger.info(f"Selected grade column for user {user_id}: {grade_col}")
 
         # Validate grade data
         df[grade_col] = pd.to_numeric(df[grade_col], errors='coerce')
         if df[grade_col].isna().all():
+            logger.warning(f"No valid grades in column {grade_col} for user {user_id}")
             await update.message.reply_text(
                 f"❌ Column `{grade_col}` contains no valid numeric grades."
             )
@@ -213,11 +243,13 @@ async def select_grade_column(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         # Calculate and send statistics
         result = calculate_statistics(df, sex_col, grade_col)
+        logger.info(f"Sending statistics to user {user_id}")
         await update.message.reply_text(result, parse_mode='Markdown')
         return ConversationHandler.END
 
     except ValueError:
         context.user_data['retries'] = context.user_data.get('retries', 0) + 1
+        logger.warning(f"Invalid input from user {user_id}: {update.message.text}")
         await update.message.reply_text(
             f"⚠️ Please enter a valid number (attempt {context.user_data['retries']}/3).",
             parse_mode='Markdown'
@@ -296,6 +328,9 @@ def calculate_statistics(df, sex_col, grade_col):
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancel the conversation."""
+    user_id = update.effective_user.id
+    logger.info(f"Cancel command from user {user_id}")
+    context.user_data.clear()
     await update.message.reply_text("Operation cancelled. Send /start to begin again.")
     return ConversationHandler.END
 
