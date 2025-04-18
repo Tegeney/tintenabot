@@ -1,9 +1,10 @@
-python-dotenv>=1.0.0
-python-telegram-bot>=20.0
-pandas>=2.0.0
-openpyxl>=3.0.0  # For Excel file support
-xlrd>=2.0.0      # For legacy Excel file support
-numpy>=1.20.0    # Required by pandas
-tabulate>=0.8.0  # For nice table formatting (optional)
-flask
-matplotlib
+python-dotenv==1.0.0
+python-telegram-bot==20.6
+pandas==2.1.4
+openpyxl==3.1.2
+xlrd==2.0.1  # For legacy Excel file support
+matplotlib==3.8.2
+seaborn==0.13.0
+numpy==1.26.2
+Flask==3.0.0
+gunicorn==21.2.0  # For production deployment
