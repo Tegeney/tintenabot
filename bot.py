@@ -68,7 +68,7 @@ def clean_gender_values(series):
             .str.upper()
             .str.strip()
             .map(gender_map)
-            .dropna()
+            .dropna())
 
 # Command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
