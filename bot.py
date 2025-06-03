@@ -102,10 +102,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
----
-
-## File Processing
-
+# File Processing
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles incoming document (Excel/CSV) files."""
     user = update.message.from_user
@@ -235,10 +232,7 @@ async def select_column_callback(update: Update, context: ContextTypes.DEFAULT_T
             del context.user_data['sex_col']
         return ConversationHandler.END
 
----
-
-## Report Generation
-
+# Report Generation
 def generate_report(df, sex_col, grade_col):
     """Generates a formatted statistics report based on gender and grade distribution."""
     
@@ -307,10 +301,7 @@ def generate_report(df, sex_col, grade_col):
 
     return "\n".join(report)
 
----
-
-## Application Setup
-
+# Application Setup
 def setup_application() -> Application:
     """Sets up the Telegram application with handlers and defines the conversation flow."""
     application = Application.builder().token(TOKEN).build()
